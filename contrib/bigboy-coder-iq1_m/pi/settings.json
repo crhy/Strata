@@ -1,0 +1,10 @@
+{
+ "defaultProvider": "strata",
+ "defaultModel": "qwen3.8-flash-next-coder-iq1_m",
+ "defaultThinkingLevel": "medium",
+ "compaction": {
+  "enabled": true,
+  "reserveTokens": 16384,
+  "keepRecentTokens": 4000
+ }
+}

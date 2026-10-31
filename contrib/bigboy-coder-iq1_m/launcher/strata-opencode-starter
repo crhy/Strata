@@ -1,0 +1,347 @@
+#!/bin/bash
+# StrataOpenCodeStarter: launches Qwen3.8 Flash Next on the Strata engine, then
+# OpenCode, btop, nvtop and a memory watchdog. Spaced Linux / Devuan, no systemd.
+#
+# Usage: strata-opencode-starter [--model coder-iq1_m] [--project DIR] [--no-dialog] [--server-only]
+#
+# Model: coder-iq1_m, the Coder variant (half the experts, chosen for code). The full q2_0 model
+# was removed on 2026-10-28 to free disk space. coder-iq1_m and it fits in VRAM + RAM so nothing is read from the SSD while it answers.
+#
+# Context size, GPU and model size are Strata's own settings; change them with
+#   cd ~/Strata && ./setup.sh --setup --context 131072 --no-start
+set -euo pipefail
+
+STRATA_DIR="$HOME/Strata"
+STRATA_MODEL=""
+STRATA_PY="$STRATA_DIR/.venv/bin/python"
+STRATA_SERVER="$STRATA_DIR/serve/server.py"
+STRATA_ENGINE="$STRATA_DIR/engine/strata"
+MODEL_MOUNT="/media/rhy/data"
+OPENCODE_CONFIG="$HOME/.config/opencode/opencode.json"
+APP_DIR="$HOME/.local/share/strata-opencode-starter"
+STATE_DIR="$HOME/.local/state/strata-opencode-starter"
+CONF_DIR="$HOME/.config/strata-opencode-starter"
+LOG_FILE="$STATE_DIR/strata-server.log"
+WATCHDOG_LOG="$STATE_DIR/memory-watchdog.log"
+RUN_DIR="$STATE_DIR/run"
+LLAMA_SERVER="$HOME/llama.cpp/build/bin/llama-server"
+
+PROJECT_DIR=""
+USE_DIALOG=1
+SERVER_ONLY=0
+
+# The engine maps ~38 GB of experts from the SSD and the kernel keeps what it
+# can in the page cache, so it wants as much free RAM as it can get.
+MIN_RAM_AVAILABLE=16384
+MIN_VRAM=14336
+
+mkdir -p "$STATE_DIR" "$CONF_DIR" "$RUN_DIR"
+
+die() {
+    printf '\nERROR: %s\n' "$*" >&2
+    if [ "$USE_DIALOG" = 1 ] && command -v zenity >/dev/null 2>&1; then
+        zenity --error --title="StrataOpenCodeStarter" --text="$*" 2>/dev/null || true
+    fi
+    printf 'Press Enter to close...'
+    read -r _x || true
+    exit 1
+}
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --model) STRATA_MODEL="$2"; shift 2 ;;
+        --project) PROJECT_DIR="$2"; shift 2 ;;
+        --no-dialog) USE_DIALOG=0; shift ;;
+        --server-only) SERVER_ONLY=1; shift ;;
+        *) die "Unknown option: $1" ;;
+    esac
+done
+command -v zenity >/dev/null 2>&1 || USE_DIALOG=0
+
+# ---- Choice: which model -----------------------------------------------------
+LAST_MODEL_FILE="$CONF_DIR/last-model"
+STRATA_MODEL="${STRATA_MODEL:-coder-iq1_m}"
+# The full q2_0 model was deleted on 2026-10-28; only the Coder variant is installed.
+# Variants of the Coder (another engine build or other flags) are strata-coder-iq1_m-<name>.json next to it.
+case "$STRATA_MODEL" in
+    coder-iq1_m|coder-iq1_m-*) ;;
+    *) die "Model '$STRATA_MODEL' is not installed; only coder-iq1_m and its coder-iq1_m-* variants are (q2_0 was removed on 2026-10-28)." ;;
+esac
+STRATA_CONFIG="$STRATA_DIR/strata-$STRATA_MODEL.json"
+
+# GUI-launched .desktop files often get a much smaller PATH than interactive shells.
+export PATH="$HOME/.local/bin:$HOME/.opencode/bin:$HOME/.bun/bin:$HOME/.npm-global/bin:/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin:${PATH:-}"
+
+find_opencode() {
+    local p
+    if command -v opencode >/dev/null 2>&1; then command -v opencode; return 0; fi
+    for p in "$HOME/.local/bin/opencode" "$HOME/.opencode/bin/opencode" "$HOME/.bun/bin/opencode" \
+             "$HOME/.npm-global/bin/opencode" /usr/local/bin/opencode /usr/bin/opencode; do
+        if [ -x "$p" ]; then printf '%s\n' "$p"; return 0; fi
+    done
+    p="$(bash -lic 'command -v opencode 2>/dev/null' 2>/dev/null | tail -n 1 || true)"
+    if [ -n "$p" ] && [ -x "$p" ]; then printf '%s\n' "$p"; return 0; fi
+    return 1
+}
+
+# ---- Preflight -------------------------------------------------------------
+# The mount is checked first so an unmounted disk isn't reported as a missing model.
+mountpoint -q "$MODEL_MOUNT" || die "$MODEL_MOUNT is not mounted."
+[ -f "$STRATA_CONFIG" ] || die "Strata is not set up: $STRATA_CONFIG is missing. Run ./setup.sh in $STRATA_DIR."
+[ -x "$STRATA_PY" ] || die "Strata's Python environment not found at $STRATA_PY"
+[ -x "$STRATA_ENGINE" ] || die "Strata engine not found at $STRATA_ENGINE"
+command -v python3 >/dev/null 2>&1 || die "python3 is required."
+command -v curl >/dev/null 2>&1 || die "curl is required."
+
+# Port, context and model name come from Strata's own config, so this launcher
+# follows whatever ./setup.sh --setup last chose.
+read -r PORT CTX MODEL_NAME < <(python3 - "$STRATA_CONFIG" <<'PY'
+import json, sys
+c = json.load(open(sys.argv[1]))
+a = c["args"]
+print(c.get("port", 8080), a[a.index("--max-context") + 1], c["model_name"])
+PY
+) || die "Could not read $STRATA_CONFIG"
+case "$CTX" in ''|*[!0-9]*) die "Context size in $STRATA_CONFIG is not a number: '$CTX'." ;; esac
+printf '%s\n' "$STRATA_MODEL" > "$LAST_MODEL_FILE"
+
+if [ "$SERVER_ONLY" = 0 ]; then
+    [ -f "$OPENCODE_CONFIG" ] || die "OpenCode config not found at $OPENCODE_CONFIG"
+    OPENCODE_BIN="$(find_opencode || true)"
+    [ -n "$OPENCODE_BIN" ] || die "OpenCode could not be found. Run 'command -v opencode' in a normal terminal."
+
+    # ---- Choice: project folder ----------------------------------------------
+    LAST_PROJECT_FILE="$CONF_DIR/last-project"
+    [ -n "$PROJECT_DIR" ] || PROJECT_DIR="$(cat "$LAST_PROJECT_FILE" 2>/dev/null || echo "$HOME/voxa")"
+    if [ "$USE_DIALOG" = 1 ]; then
+        picked="$(zenity --file-selection --directory --title="Project folder for OpenCode" \
+            --filename="$PROJECT_DIR/" 2>/dev/null)" || exit 0
+        PROJECT_DIR="$picked"
+    fi
+    [ -d "$PROJECT_DIR" ] || die "Project folder not found: $PROJECT_DIR"
+    printf '%s\n' "$PROJECT_DIR" > "$LAST_PROJECT_FILE"
+fi
+
+# ---- Stop any previous model server and wait for its memory to be released ----
+# Both the old llama.cpp server and an earlier Strata hold most of the VRAM.
+stop_matching() {
+    local pat="$1" what="$2" pids
+    pids="$(pgrep -f "$pat" || true)"
+    [ -n "$pids" ] || return 0
+    printf 'Stopping previous %s: %s\n' "$what" "$(echo $pids)"
+    kill $pids 2>/dev/null || true
+    for _ in $(seq 1 30); do
+        pgrep -f "$pat" >/dev/null || return 0
+        sleep 0.5
+    done
+    printf '%s did not stop within 15s; forcing it.\n' "$what"
+    pkill -9 -f "$pat" || true
+    sleep 1
+}
+stop_matching "$STRATA_SERVER" "Strata server"
+stop_matching "$STRATA_ENGINE --serve" "Strata engine"
+stop_matching "$LLAMA_SERVER.*Qwen3.8-Flash-Next" "Qwen llama-server"
+if curl -fsS -m 2 "http://127.0.0.1:$PORT/health" >/dev/null 2>&1; then
+    die "Something else is already serving on port $PORT."
+fi
+
+# ---- Memory preflight -------------------------------------------------------
+avail=$(awk '/^MemAvailable:/ {print int($2/1024)}' /proc/meminfo)
+swapf=$(awk '/^SwapFree:/ {print int($2/1024)}' /proc/meminfo)
+printf 'Memory: %s MiB RAM available, %s MiB swap free.\n' "$avail" "$swapf"
+if [ "$avail" -lt "$MIN_RAM_AVAILABLE" ]; then
+    printf 'WARNING: under %s MiB of RAM is available. Strata reads the experts that do not\n' "$MIN_RAM_AVAILABLE"
+    printf '         fit in RAM from the SSD, so it will be slower. Closing browser tabs helps.\n'
+fi
+if command -v nvidia-smi >/dev/null 2>&1; then
+    vfree=$(nvidia-smi --query-gpu=memory.free --format=csv,noheader,nounits | head -n 1 | tr -d ' ')
+    printf 'VRAM: %s MiB free.\n' "$vfree"
+    if [ "$vfree" -lt "$MIN_VRAM" ]; then
+        printf 'WARNING: under %s MiB VRAM free; fewer experts will fit on the GPU. Other GPU users:\n' "$MIN_VRAM"
+        nvidia-smi --query-compute-apps=pid,process_name,used_memory --format=csv,noheader | sed 's/^/  /'
+    fi
+fi
+echo
+
+# ---- OpenCode config ----------------------------------------------------------
+# Same budget as the llama.cpp launcher: OpenCode only checks for compaction
+# between steps, so one step's tool output can overshoot the limit and
+# SAFETY_TOKENS absorbs that. Qwen's reasoning counts as output, so output
+# scales with context (capped at 8192).
+if [ "$SERVER_ONLY" = 0 ]; then
+    OUTPUT_TOKENS=$((CTX / 8))
+    [ "$OUTPUT_TOKENS" -gt 8192 ] && OUTPUT_TOKENS=8192
+    SAFETY_TOKENS=$((CTX / 8))
+    [ "$SAFETY_TOKENS" -gt 8192 ] && SAFETY_TOKENS=8192
+    RESERVED_TOKENS=2048
+    INPUT_TOKENS=$((CTX - OUTPUT_TOKENS - SAFETY_TOKENS))
+
+    python3 - "$OPENCODE_CONFIG" "$CTX" "$INPUT_TOKENS" "$OUTPUT_TOKENS" "$PORT" "$MODEL_NAME" "$RESERVED_TOKENS" <<'PY'
+import json, shutil, sys, time
+from pathlib import Path
+
+p = Path(sys.argv[1])
+ctx, inp, out, port, name = int(sys.argv[2]), int(sys.argv[3]), int(sys.argv[4]), sys.argv[5], sys.argv[6]
+reserved = int(sys.argv[7])
+original = p.read_text()
+cfg = json.loads(original)
+
+# A provider of its own, so the llama.cpp launcher's entry stays as it was.
+strata = cfg.setdefault("provider", {}).setdefault("strata", {})
+strata["npm"] = "@ai-sdk/openai-compatible"
+strata["name"] = "Qwen3.8 Flash Next Local Strata"
+strata.setdefault("options", {})["baseURL"] = f"http://127.0.0.1:{port}/v1"
+strata["options"]["timeout"] = False
+
+model = strata.setdefault("models", {}).setdefault(name, {})
+model["name"] = f"{name} (Strata) {ctx // 1024}K"
+model["limit"] = {"context": ctx, "input": inp, "output": out}
+
+cfg["model"] = f"strata/{name}"
+cfg["compaction"] = {
+    "auto": True,
+    "prune": True,
+    "reserved": reserved,
+    "tail_turns": 1,
+    "preserve_recent_tokens": 1024,
+}
+
+# A single large file read or command output could otherwise fill most of the
+# context in one step (32 KB is ~8K tokens).
+cfg["tool_output"] = {"max_lines": 500, "max_bytes": 16384}
+
+if isinstance(cfg.get("mcp"), dict) and isinstance(cfg["mcp"].get("kdenlive"), dict):
+    cfg["mcp"]["kdenlive"]["enabled"] = False
+
+new = json.dumps(cfg, indent=2) + "\n"
+if new != original:
+    # Back up only when something actually changes, and keep the last five.
+    backup = p.with_name(p.name + ".backup-" + time.strftime("%Y%m%d-%H%M%S"))
+    shutil.copy2(p, backup)
+    p.write_text(new)
+    backups = sorted(p.parent.glob(p.name + ".backup-*"))
+    for old in backups[:-5]:
+        old.unlink()
+    print(f"OpenCode config updated for Strata, {ctx} context (backup: {backup.name}).")
+else:
+    print(f"OpenCode config already set for Strata, {ctx} context.")
+PY
+    printf 'OpenCode limits: context %s, input %s, output %s.\n\n' "$CTX" "$INPUT_TOKENS" "$OUTPUT_TOKENS"
+fi
+
+# ---- Terminals ------------------------------------------------------------------
+if   command -v mate-terminal  >/dev/null 2>&1; then TERM_KIND="mate"
+elif command -v xfce4-terminal >/dev/null 2>&1; then TERM_KIND="xfce"
+elif command -v gnome-terminal >/dev/null 2>&1; then TERM_KIND="gnome"
+elif command -v xterm          >/dev/null 2>&1; then TERM_KIND="xterm"
+else die "No supported terminal emulator found."; fi
+
+# Each window runs a small generated script, so commands never need to be
+# re-quoted for a particular terminal's command-line syntax. Windows are started
+# with setsid so closing this launcher's own terminal can't take a window that
+# is still starting down with it.
+open_term() {
+    local title="$1" body="$2" name script
+    name="$(printf '%s' "$title" | tr -c 'A-Za-z0-9' '_')"
+    script="$RUN_DIR/$name.sh"
+    {
+        printf '#!/bin/bash\n'
+        printf '%s\n' "$body"
+        printf 'printf "\\n[%%s exited] Press Enter to close... " %q\n' "$title"
+        printf 'read -r _x\n'
+    } > "$script"
+    chmod +x "$script"
+    case "$TERM_KIND" in
+        mate)  setsid -f mate-terminal --title="$title" -- "$script" ;;
+        xfce)  setsid -f xfce4-terminal --title="$title" --command="$script" ;;
+        gnome) setsid -f gnome-terminal --title="$title" -- "$script" ;;
+        xterm) setsid -f xterm -T "$title" -e "$script" ;;
+    esac
+}
+
+# ---- Locked-memory limit --------------------------------------------------------
+# Strata pins the experts the GPU does not hold in RAM (about 20+ GB). With the default 8 MB
+# memlock limit the pin silently fails (VmLck 0), the experts stay as evictable file cache and are
+# re-read from disk, which roughly halves tokens/sec. The limit comes from
+# /etc/security/limits.d/90-strata-memlock.conf (needs one sudo + a fresh login).
+MEMLOCK_KB="$(ulimit -l)"
+if [ "$MEMLOCK_KB" != "unlimited" ] && [ "$MEMLOCK_KB" -lt 25165824 ]; then
+    if [ "$(ulimit -H -l)" = "unlimited" ] || [ "$(ulimit -H -l)" -ge 25165824 ] 2>/dev/null; then
+        ulimit -S -l "$(ulimit -H -l)"
+    else
+        printf 'WARNING: locked-memory limit is %s KB, so Strata cannot pin its experts in RAM\n' "$MEMLOCK_KB"
+        printf '         and will run slower. Fix once with:\n'
+        printf '         echo "%s - memlock unlimited" | sudo tee /etc/security/limits.d/90-strata-memlock.conf\n' "$USER"
+        printf '         then log out and back in.\n\n'
+    fi
+fi
+
+# Keep the previous log so a crash can still be read after relaunching.
+[ -f "$LOG_FILE" ] && mv -f "$LOG_FILE" "$LOG_FILE.1"
+: > "$LOG_FILE"
+
+# No --open: Strata's web app (chat and a live monitor) is at the address
+# printed below, but the browser is left alone.
+SERVER_TITLE="Strata - $MODEL_NAME - $((CTX / 1024))K"
+open_term "$SERVER_TITLE" "ulimit -S -l \$(ulimit -H -l) 2>/dev/null; cd $(printf %q "$STRATA_DIR") && $(printf %q "$STRATA_PY") $(printf %q "$STRATA_SERVER") \\
+  --engine strata --config $(printf %q "$STRATA_CONFIG") --port $PORT 2>&1 | tee -a $(printf %q "$LOG_FILE")"
+
+command -v btop  >/dev/null 2>&1 && open_term "btop - System Monitor"  "btop"  || printf 'WARNING: btop not found.\n'
+command -v nvtop >/dev/null 2>&1 && open_term "nvtop - NVIDIA Monitor" "nvtop" || printf 'WARNING: nvtop not found.\n'
+
+# ---- Wait for the server, failing fast if it dies ---------------------------------
+# /health answers before the model is in; "loaded": true is the real signal.
+printf 'Waiting for Strata on port %s (the PC can be sluggish for a minute or two)...\n' "$PORT"
+SERVER_PID=""
+ready=0
+for i in $(seq 1 360); do
+    [ -n "$SERVER_PID" ] || SERVER_PID="$(pgrep -f "$STRATA_SERVER" | head -n 1 || true)"
+    if curl -fsS -m 2 "http://127.0.0.1:$PORT/health" 2>/dev/null | grep -q '"loaded": *true'; then
+        ready=1
+        break
+    fi
+    if [ "$i" -gt 10 ] && [ -n "$SERVER_PID" ] && ! kill -0 "$SERVER_PID" 2>/dev/null; then
+        printf '\nStrata exited during loading. Last log lines:\n'
+        tail -n 20 "$LOG_FILE"
+        die "Strata exited during loading. See $LOG_FILE and $STRATA_DIR/strata-$STRATA_MODEL.log"
+    fi
+    if [ "$i" -gt 10 ] && [ -z "$SERVER_PID" ]; then
+        tail -n 20 "$LOG_FILE"
+        die "Strata did not start. See $LOG_FILE"
+    fi
+    [ $((i % 15)) -eq 0 ] && printf '  still loading (%ss)...\n' "$((i * 2))"
+    sleep 2
+done
+[ "$ready" = 1 ] || die "Strata did not become ready within 12 minutes. See $LOG_FILE"
+printf 'Strata is ready (context %s).\n' "$CTX"
+
+# ---- Memory watchdog (stops itself when the server exits) ----------------------
+nohup "$APP_DIR/memory-watchdog" "$SERVER_PID" "$WATCHDOG_LOG" >/dev/null 2>&1 &
+
+if [ "$SERVER_ONLY" = 0 ]; then
+    # ---- OpenCode: offer to free the model's memory when it closes ---------------
+    open_term "OpenCode - $(basename "$PROJECT_DIR") - Strata" "cd $(printf %q "$PROJECT_DIR") && $(printf %q "$OPENCODE_BIN")
+if pgrep -f $(printf %q "$STRATA_SERVER") >/dev/null && command -v zenity >/dev/null 2>&1 && \\
+   zenity --question --title=StrataOpenCodeStarter --text='OpenCode closed. Stop Strata to free its memory?' 2>/dev/null; then
+    pkill -f $(printf %q "$STRATA_SERVER")
+    # The engine is a separate process holding the VRAM; make sure it goes too.
+    sleep 2
+    pkill -f $(printf %q "$STRATA_ENGINE --serve")
+fi"
+
+    # Don't exit (closing this terminal) until OpenCode's window is really up.
+    printf 'Waiting for OpenCode to open...\n'
+    for _ in $(seq 1 40); do
+        pgrep -x opencode >/dev/null && break
+        sleep 0.5
+    done
+    pgrep -x opencode >/dev/null || printf 'WARNING: OpenCode did not appear within 20s; check its window.\n'
+    printf '\nStarted Strata (%s context), btop, nvtop, OpenCode and the memory watchdog.\n' "$CTX"
+    printf 'Project:      %s\n' "$PROJECT_DIR"
+else
+    printf '\nStarted Strata (%s context), btop, nvtop and the memory watchdog.\n' "$CTX"
+fi
+printf 'Model API:    http://127.0.0.1:%s/v1\n' "$PORT"
+printf 'Chat/Monitor: http://127.0.0.1:%s/\n' "$PORT"
+printf 'Server log:   %s\n' "$LOG_FILE"
+printf 'Watchdog log: %s\n' "$WATCHDOG_LOG"

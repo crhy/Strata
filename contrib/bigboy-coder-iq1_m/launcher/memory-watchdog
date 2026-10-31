@@ -1,0 +1,46 @@
+#!/bin/bash
+# Watches RAM and swap while the Strata engine runs, and raises a desktop
+# notification when swap runs low (the step before the OOM killer).
+# VRAM is not watched: Strata fills the card with experts on purpose and
+# leaves only a few hundred MiB free.
+# Usage: memory-watchdog <server-pid> <log-file>
+set -u
+
+SERVER_PID="$1"
+LOG="$2"
+prev=""
+
+notify() {
+    printf '%s %s\n' "$(date +%T)" "$1" >> "$LOG"
+    if command -v zenity >/dev/null 2>&1; then
+        zenity --notification --text="$1" 2>/dev/null &
+    fi
+}
+
+while kill -0 "$SERVER_PID" 2>/dev/null; do
+    avail=$(awk '/^MemAvailable:/ {print int($2/1024)}' /proc/meminfo)
+    swapf=$(awk '/^SwapFree:/ {print int($2/1024)}' /proc/meminfo)
+    swapt=$(awk '/^SwapTotal:/ {print int($2/1024)}' /proc/meminfo)
+
+    s=""
+    if   [ "$avail" -lt 512 ];  then s="$s RAM-CRITICAL"
+    elif [ "$avail" -lt 1024 ]; then s="$s RAM-LOW"; fi
+    if [ "${swapt:-0}" -gt 0 ]; then   # no swap at all is a valid setup; nothing to warn about
+        if   [ "$swapf" -lt 256 ];  then s="$s SWAP-CRITICAL"
+        elif [ "$swapf" -lt 1024 ]; then s="$s SWAP-LOW"; fi
+    fi
+    s=${s# }
+    s=${s:-OK}
+
+    if [ "$s" != "$prev" ]; then
+        case "$s" in
+            *CRITICAL*)
+                notify "Strata/OpenCode memory: $s (RAM ${avail}M, swap ${swapf}M free)" ;;
+            *)
+                printf '%s %s (RAM %sM, swap %sM free)\n' "$(date +%T)" "$s" "$avail" "$swapf" >> "$LOG" ;;
+        esac
+        prev="$s"
+    fi
+    sleep 5
+done
+printf '%s Strata server exited; watchdog stopping.\n' "$(date +%T)" >> "$LOG"
