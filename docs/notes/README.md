@@ -13,3 +13,4 @@ Working notes, decisions and standing orders for this project, kept by Claude Co
 - [strata-pi-launcher](strata-pi-launcher.md): rhY's "Strata (pi)" Brisk-menu favourite (~/.local/bin/strata-pi) for working with Strata directly when Claude tokens run out
 - [strata-pi-compaction-fix](strata-pi-compaction-fix.md): pi "Summarization failed: token cap" / truncated write on Strata was snowballing compaction summaries; fixed by ~/.pi/agent/extensions/strata-compaction.ts (2026-11-01).
 - [strata-vs-avalon-ab](strata-vs-avalon-ab.md): Strata vs Avalon A/B = both engines build Spaced Monitor from the same 9 tasks; setup, files and how to resume (2026-10-31)
+- [notes-live-on-github](notes-live-on-github.md): rhY's rule (2026-11-01): all Spaced/theme data and every memory note must be on GitHub; upload each note to its repo's docs/notes/ right after writing it.
