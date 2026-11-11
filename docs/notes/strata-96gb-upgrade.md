@@ -60,3 +60,9 @@ Starter default is now **qwen-iq3_s**; `--model coder-iq1_m-ram` gives the Coder
 
 **BIOS result (2026-11-11):** after several reboots rhY found **4000 MT/s** is the highest stable setting for the 4
 mixed DIMMs (5200/4800 failed). Bandwidth 50.7 -> 56.5 GB/s (+11%). Above that needs a matched 2x48 GB kit.
+
+**Before/after at 4000 MT/s (2026-11-11, same g01 task, same start):** decode mean 59.7 tok/s (49-70) vs 58.8 (46-67)
+at 3600: ~+1.5%, within noise, despite +11% bandwidth. GPU expert hit rate ~75-76% both runs (the 66% seen earlier was
+one request). So IQ3_S decode on this PC is NOT RAM-bandwidth bound; a 2x48 GB kit would buy little speed. Run: 2 min
+12 s, 9 turns, 15/15 tests, identical numbers. RAM quick test at 4000: stress-ng --vm --verify 21 GB 5 min, 0 failures.
+Lesson: don't stop a pi task's job from outside; Strata restarted the "cut short" memtest. Put durations in the task.
