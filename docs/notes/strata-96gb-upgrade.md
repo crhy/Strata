@@ -51,3 +51,9 @@ test-artifacts, swapfile-temp. Never touch OpenAirShips or Unreal Engine (rhY).
 **Why:** rhY wants the smartest model the new RAM allows and a working Strata pi harness for it.
 **How to apply:** switch to IQ3_S only after rhY says the Coder's current project is done; open the pi window
 ([[always-open-pi-window]]); gate with a real task. Supersedes the numbers in [[strata-ram-budget]].
+
+**IQ3_S live (2026-11-10 23:05):** loaded in 125 s; 256K served; RAM ~47 GB locked experts, ~35 GB still free.
+Gate g01-logstat in ~/strata-gate passed first try in 3 min 40 s (16 turns, 17 tool calls, 11.3K output tokens,
+0 compactions, 14/14 tests, every summary number matched an independent check). Decode 45.6-67.1 tok/s (mean 58.8)
+at 3600 MT/s RAM; GPU expert hit rate ~66% (Coder 85%), so the BIOS RAM fix matters more for IQ3_S.
+Starter default is now **qwen-iq3_s**; `--model coder-iq1_m-ram` gives the Coder at 256K.
