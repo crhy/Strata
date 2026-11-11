@@ -57,3 +57,6 @@ Gate g01-logstat in ~/strata-gate passed first try in 3 min 40 s (16 turns, 17 t
 0 compactions, 14/14 tests, every summary number matched an independent check). Decode 45.6-67.1 tok/s (mean 58.8)
 at 3600 MT/s RAM; GPU expert hit rate ~66% (Coder 85%), so the BIOS RAM fix matters more for IQ3_S.
 Starter default is now **qwen-iq3_s**; `--model coder-iq1_m-ram` gives the Coder at 256K.
+
+**BIOS result (2026-11-11):** after several reboots rhY found **4000 MT/s** is the highest stable setting for the 4
+mixed DIMMs (5200/4800 failed). Bandwidth 50.7 -> 56.5 GB/s (+11%). Above that needs a matched 2x48 GB kit.
