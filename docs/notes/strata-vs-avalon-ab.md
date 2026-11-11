@@ -29,3 +29,5 @@ Avalon cannot run usefully here: 88 GB model, 31 GB RAM, SATA SSDs only -> every
 disk (300 MB/s): prefill 3-13 tok/s (README 1,600), generation 6-9 tok/s (Strata 60-70). -b/-ub 9536 also OOMs a 16 GB
 card (needs -ub 2048). Would need a fast NVMe (or ~96 GB RAM) to retest. Model still at ~/models (90 GB) unless deleted.
 Then: Strata polishes its version (tasks p01/p02 in ~/spacedmonitor-ab/tasks) to become crhy/spacedmonitor main.
+
+**2026-11-10:** Avalon model and ~/Avalon deleted (rhY). Even at 96 GB its 88 GB model leaves no room for the desktop; Strata IQ3_S is the full-model path now ([[strata-96gb-upgrade]]).
