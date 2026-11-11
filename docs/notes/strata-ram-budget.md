@@ -13,4 +13,6 @@ The coder-iq1_m Strata engine (`--resident-experts`) copies every expert the GPU
 2026-10-30 23:14: the PC froze when pi compacted t70's 64K context while Strata's task was opening GTK test windows on rhY's real desktop via xdotool; swap had been 8-10 GB used all evening.
 
 **Why:** two freezes so far; rhY has to reboot and loses running work.
+**Superseded 2026-11-10:** RAM is now 96 GB; see [[strata-96gb-upgrade]]. Kept for history.
+
 **How to apply:** with Brave open (it stays open, see [[brave-stays-open]]) there are ~2 GB of headroom; keep extra processes small while Strata runs (one VM max, no GUI tests on DISPLAY :0, see Supermox header rule 8); earlyoom (config in `/etc/default/earlyoom`, prefers killing pi/node/opencode; pi's process name is `pi`) and the watchdog's pi-task abort are the safety nets, not a budget. Related: [[watch-strata-speed]], [[tmp-is-ram-on-this-machine]], [[no-desktop-automation]].
