@@ -253,9 +253,10 @@ bool available_memory_bytes(uint64_t& bytes) {
             std::string limit;
             uint64_t current = 0;
             const bool readable = bool(limit_file >> limit) && bool(current_file >> current);
-            // The host's root cgroup has no memory.max; ordinary child groups must expose their limits.
-            if (!readable && !(path == root && !std::filesystem::exists(path / "memory.max") &&
-                               std::filesystem::exists(path / "cgroup.controllers"))) return false;
+            // No memory.max: the host's root cgroup, or a group whose parent leaves the memory controller off
+            // (elogind sessions on sysvinit hosts) - no limit at this level.  A memory.max that cannot be read fails.
+            if (!readable && (std::filesystem::exists(path / "memory.max") ||
+                              !std::filesystem::exists(path / "cgroup.controllers"))) return false;
             if (readable && limit != "max") {
                 try {
                     size_t consumed = 0;
