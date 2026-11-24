@@ -46,6 +46,22 @@ context.
 The monitor plugged into the graphics card and other GPU programs take VRAM from the expert cache; RAM running below
 its rated speed (enable EXPO/XMP in the BIOS) slows the CPU half.
 
+**A coding agent says "Auto-compaction failed: Summarization failed: generation hit the
+token cap and the summary is incomplete".**
+That is the agent's own output limit cutting the summary short, not Strata failing. Measured on pi 1.4.0 with the
+Coder IQ1_M model at 65536 context: the agent asked for at most 8192 output tokens (`maxTokens` in its `models.json`);
+the summary of a 37k-token conversation needs 5.6-6.8k tokens of text, and the 3000-token reasoning budget in
+`strata-<model>.json` spends 2-3k of the same 8192, so the call ends at the cap and the agent throws the summary away.
+Fix: raise the agent's output limit (pi: `maxTokens` 8192 -> 16384 in `~/.pi/agent/models.json`); with
+`fit_max_tokens: true` the server clamps that to the room left in the context instead of refusing the request. Or
+lower `reasoning_budget_tokens` (reasoning tokens are paid out of the same budget), or keep more of the conversation
+out of the summary (pi: `compaction.keepRecentTokens`).
+The bigger output limit is not enough on its own. In the same log the largest prompts were 64413, 64479 and 64797
+tokens, so `fit_max_tokens` left 739 tokens of room there - no summary of a 37k-token conversation fits. The input
+has to shrink: compact at about 40% of the window instead of 75% (pi: `compaction.reserveTokens` 40000, or
+`compaction.enabled: false` plus a manual `/compact`), and keep tool output small (`| tail -30`). See
+[../NOTE-pi-compaction-20261101.md](../NOTE-pi-compaction-20261101.md) for the machine-specific numbers.
+
 **Pictures are refused, or slow.**
 "this server was started without the vision encoder": the model was set up for text only - run setup again with
 `--vision gpu` (or `--vision cpu`). Pictures that take 10-30 s are read by the encoder on the CPU; `--vision gpu`

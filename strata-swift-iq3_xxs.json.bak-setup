@@ -1,0 +1,40 @@
+{
+ "exe": "/home/rhy/Strata/engine/strata",
+ "args": [
+  "--pack",
+  "/media/rhy/data/Strata-data/packs/swift-iq3_xxs",
+  "--native",
+  "/media/rhy/data/Models/swift-IQ3_XXS/Swift-Qwen3.8-Flash-Next-GSQ-RCO-IQ3_XXS-00001-of-00002.gguf",
+  "--ple-gguf",
+  "/media/rhy/data/Models/swift-IQ3_XXS/Swift-Qwen3.8-Flash-Next-GSQ-RCO-IQ3_XXS-00001-of-00002.gguf",
+  "--expert-profile",
+  "/home/rhy/Strata/data/expert-profile.bin",
+  "--expert-cache",
+  "auto",
+  "--prefill",
+  "auto",
+  "--spec",
+  "4",
+  "--spec-min-p",
+  "0.5",
+  "--mtp",
+  "/media/rhy/data/Strata-data/mtp/rt",
+  "--max-context",
+  "262144",
+  "--kv",
+  "int8",
+  "--kv-resident",
+  "32768"
+ ],
+ "cwd": "/home/rhy/Strata",
+ "tokenizer": "/media/rhy/data/Strata-data/packs/swift-iq3_xxs/tokenizer",
+ "model_name": "swift-1.5-iq3_xxs",
+ "log": "/home/rhy/Strata/strata-swift-iq3_xxs.log",
+ "lib_dirs": [
+  "/usr/local/cuda/bin",
+  "/usr/local/cuda/lib64"
+ ],
+ "port": 8080,
+ "gpu": 0,
+ "gpus_asked": true
+}
